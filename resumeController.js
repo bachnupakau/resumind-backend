@@ -1,12 +1,8 @@
-const Anthropic = require("@anthropic-ai/sdk");
 const pdfParse = require("pdf-parse");
 const Analysis = require("../models/Analysis");
 const User = require("../models/User");
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
 // POST /api/resume/analyze
-// Accepts: multipart form with optional `file` (PDF) + optional `resumeText` + optional `jobDescription`
 const analyzeResume = async (req, res) => {
   try {
     let resumeText = req.body.resumeText || "";
@@ -58,21 +54,34 @@ Return ONLY valid JSON (no markdown, no backticks) in this exact format:
   "summary": "<2-3 sentence honest career summary>"
 }`;
 
-    // Call Claude API
-    const message = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1500,
-      messages: [{ role: "user", content: prompt }],
-    });
+    // Call Gemini API
+    const geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.ANTHROPIC_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 2000 }
+        })
+      }
+    );
 
-    const raw = message.content.map((b) => b.text || "").join("");
+    const geminiData = await geminiRes.json();
+
+    if (!geminiRes.ok) {
+      console.error("Gemini error:", geminiData);
+      return res.status(502).json({ error: "AI service error. Please try again." });
+    }
+
+    const raw = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
     const clean = raw.replace(/```json|```/g, "").trim();
     const result = JSON.parse(clean);
 
     // Save to database
     const analysis = await Analysis.create({
       user: req.user._id,
-      resumeText: resumeText.slice(0, 5000), // store first 5000 chars
+      resumeText: resumeText.slice(0, 5000),
       jobDescription: jobDescription.slice(0, 2000),
       result,
     });
@@ -116,7 +125,7 @@ const getAnalysis = async (req, res) => {
   try {
     const analysis = await Analysis.findOne({
       _id: req.params.id,
-      user: req.user._id, // ensure ownership
+      user: req.user._id,
     });
 
     if (!analysis) {
